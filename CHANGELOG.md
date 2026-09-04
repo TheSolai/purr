@@ -4,6 +4,40 @@ All notable changes to **purr** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-09-04
+
+### Added
+- **Multi-tab concurrent chats.** `Ctrl+T` opens a new tab with the current
+  agent + a fresh history file. `Ctrl+W` closes the current tab. `Ctrl+1..9`
+  switches to tab N. Tab bar at the top of the chat shows the active tab in
+  inverted pink, busy tabs with a ⏳ marker, and a `+` to hint at the new-tab
+  action. Each tab persists independently to `~/.purr/chats/`. Busy state is
+  per-tab so you can switch while a long response streams.
+- **`@file` syntax** (a la aider/Continue). Type `@~/path/to/file.py` in
+  the input and the file's contents are inlined into the message before
+  sending, wrapped in a fenced code block with the right language hint
+  (`@foo.py` → `python`, `@foo.rs` → `rust`, etc.). Supports absolute,
+  `~`-relative, and `./`/`../` paths. Quoted paths for filenames with
+  spaces: `@'~/my docs/notes.md'`. Email addresses (`user@host`) are
+  protected by a negative lookbehind so they don't get mistakenly
+  expanded. Hard cap 200 kB per file.
+- **Edit-and-regenerate.** `Ctrl+R` regenerates the last assistant response
+  by truncating history to before the last user message and re-sending.
+  `Up` arrow in an empty input recalls the last user message (basic
+  history of 50). `Ctrl+R` is a no-op while a response is streaming.
+- **Token count + response time in the header.** Second status line shows
+  `tab N/M · agent · last: 13.2s ~2,572 tok` after every model turn.
+  Token estimate is `len(content) // 4` (rough but good enough for at-a-glance).
+- **`/history [search]` and `/resume N`.** `/history` lists up to 20 past
+  chat sessions from `~/.purr/chats/` (with full filter — works by
+  agent name, message text, or session id), with message counts and
+  timestamps. `/resume N` opens the Nth session from the most recent
+  `/history` listing in a new tab.
+- **10 new history tests** (`tests/test_history.py`) and **10 new attachment
+  tests** (`tests/test_attachments.py`).
+- Total tests: **150** (was 130). Live-verified `@file` end-to-end and
+  multi-tab state.
+
 ## [0.1.3] — 2026-09-04
 
 ### Fixed

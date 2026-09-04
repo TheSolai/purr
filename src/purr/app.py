@@ -32,6 +32,7 @@ import json
 import shlex
 import sys
 from typing import ClassVar
+from dataclasses import dataclass, field
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -60,6 +61,33 @@ from purr.history import ChatHistory
 from purr.ollama_client import ChatMessage, OllamaClient
 from purr import tools as toolmod
 from purr import yolo as yolomod
+
+
+# ---- tab state (multi-chat) -----------------------------------------------
+
+@dataclass
+class TabState:
+    """Per-chat state. PurrApp.tabs holds one of these per open tab."""
+    agent_name: str
+    model: str
+    history_path: str  # path to the JSONL file
+    chat_md: str = ""
+    bubble_anchor: int = -1
+    title: str = ""
+    busy: bool = False
+    session_id: str = ""
+
+    @classmethod
+    def new(cls, agent_name: str, model: str) -> "TabState":
+        # create a fresh history file (session_id is auto-generated)
+        h = ChatHistory(agent=agent_name)
+        return cls(
+            agent_name=agent_name,
+            model=model,
+            history_path=str(h.path),
+            title=f"new {agent_name} chat",
+            session_id=h.session_id,
+        )
 
 
 # ---- universal persona rules (appended to every persona's system prompt) ---
@@ -181,7 +209,23 @@ class Header(Static):
             status.append("  (chat-only — /agent to switch)", style="dim italic")
         else:
             status.append("   ·   type / for commands, ctrl+c to quit", style="dim")
-        text.append(status)
+        # second status line — tab + telemetry
+        text.append("\n")
+        line2 = Text()
+        line2.append("  ", style="dim")
+        line2.append(f"tab {app.current_tab_idx+1}/{len(app.tabs)}", style="dim")
+        line2.append(f" · {agent.name}", style="dim")
+        if app._last_response_seconds > 0:
+            s = app._last_response_seconds
+            t = app._last_response_tokens
+            if s < 1:
+                t_str = f"{s*1000:.0f}ms"
+            elif s < 60:
+                t_str = f"{s:.1f}s"
+            else:
+                t_str = f"{s/60:.1f}m"
+            line2.append(f"   ·   last: {t_str} ~{t:,} tok", style="dim #94e2d5")
+        text.append(line2)
         self.update(text)
 
 
@@ -226,6 +270,44 @@ class Sidebar(Static):
         self.update(t)
 
 
+# ---- tab bar widget --------------------------------------------------------
+
+class TabBar(Static):
+    """Horizontal tab strip — one button per open chat.
+
+    Renders via `render_for(app)` which is called by PurrApp whenever the
+    tab list or active tab changes. Buttons are focusable so users can
+    click them; we also support ctrl+1..9 via bindings on the app.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._app_ref: "PurrApp | None" = None
+
+    def on_mount(self) -> None:
+        self._app_ref = self.app  # type: ignore[assignment]
+
+    def render_for(self, app: "PurrApp") -> None:
+        t = Text()
+        if not app.tabs:
+            t.append("  (no tabs — Ctrl+T to open one)", style="dim italic")
+            self.update(t)
+            return
+        for i, tab in enumerate(app.tabs):
+            label = f" {i+1}. {tab.agent_name} "
+            if tab.busy:
+                label = f" {i+1}. {tab.agent_name} ⏳ "
+            style_active = "bold reverse #f5c2e7"
+            style_inactive = "#585b70"
+            if i == app.current_tab_idx:
+                t.append("[" + label + "]", style=style_active)
+            else:
+                t.append(" " + label + " ", style=style_inactive)
+            t.append("  ", style="")
+        t.append("  +", style="bold #a6e3a1")
+        self.update(t)
+
+
 # ---- the app itself --------------------------------------------------------
 
 class PurrApp(App):
@@ -235,6 +317,12 @@ class PurrApp(App):
     }
     #body {
       height: 1fr;
+    }
+    #tab-bar {
+      height: 1;
+      padding: 0 1;
+      background: $surface;
+      color: $text-muted;
     }
     #chat-scroll {
       height: 1fr;
@@ -261,7 +349,9 @@ class PurrApp(App):
         Binding("ctrl+c", "quit", "quit", show=True),
         Binding("ctrl+l", "clear_chat", "clear", show=True),
         Binding("ctrl+n", "new_agent", "new agent", show=True),
-        Binding("ctrl+t", "next_agent", "next agent", show=True),
+        Binding("ctrl+t", "new_tab", "new tab", show=True),
+        Binding("ctrl+w", "close_tab", "close tab", show=False),
+        Binding("ctrl+r", "regenerate", "regen", show=False),
         Binding("f1", "help", "help", show=False),
     ]
 
@@ -280,16 +370,112 @@ class PurrApp(App):
         self.active_agent = first
         self.current_model = first.model or self.config.default_model
         self.client = OllamaClient(host=self.config.ollama_host)
-        self.history = ChatHistory(agent=self.active_agent.name)
-        self._busy = False
-        self._chat_md = ""          # full Markdown source shown in the chat pane
-        self._bubble_anchor = -1    # index into _chat_md where the in-progress bubble starts (or -1)
+
+        # multi-tab state
+        self.tabs: list[TabState] = [TabState.new(self.active_agent.name, self.current_model)]
+        self.current_tab_idx: int = 0
+        self._sync_current_from_tab()
+
+        # per-turn telemetry
+        self._last_response_seconds: float = 0.0
+        self._last_response_tokens: int = 0
+        self._user_input_history: list[str] = []  # for Up-arrow recall
+
         self.title = f"🐾 purr — chatting with {self.active_agent.title}"
+
+    # ---- tab helpers -------------------------------------------------------
+
+    def _sync_current_from_tab(self) -> None:
+        """Load the current tab's state into the active per-instance fields."""
+        tab = self.tabs[self.current_tab_idx]
+        self.history = ChatHistory(agent=tab.agent_name, session_id=tab.session_id)
+        if str(self.history.path) != tab.history_path:
+            self.history.path = tab.history_path  # type: ignore[attr-defined]
+        self._chat_md = tab.chat_md
+        self._bubble_anchor = tab.bubble_anchor
+        self._busy = tab.busy
+        agent = self.agents.get(tab.agent_name) or self.active_agent
+        self.active_agent = agent
+        self.current_model = tab.model
+        self.title = f"🐾 purr — {self.active_agent.title} (tab {self.current_tab_idx+1}/{len(self.tabs)})"
+
+    def _sync_tab_from_current(self) -> None:
+        """Save the active per-instance state back into the current tab."""
+        tab = self.tabs[self.current_tab_idx]
+        tab.chat_md = self._chat_md
+        tab.bubble_anchor = self._bubble_anchor
+        tab.busy = self._busy
+        tab.model = self.current_model
+        tab.agent_name = self.active_agent.name
+
+    def action_new_tab(self) -> None:
+        """Open a new tab using the current agent. Ctrl+T."""
+        self._sync_tab_from_current()
+        new = TabState.new(self.active_agent.name, self.current_model)
+        self.tabs.append(new)
+        self.current_tab_idx = len(self.tabs) - 1
+        self._sync_current_from_tab()
+        self._refresh_chrome()
+        self.query_one("#chat", TextualMarkdown).update(self._chat_md)
+        self._scroll_to_bottom()
+        self._append_bubble("purr", f"📑 new tab opened (tab {self.current_tab_idx+1}/{len(self.tabs)}). Ctrl+W to close, Ctrl+1..9 to switch.", "#a6e3a1")
+
+    def action_close_tab(self) -> None:
+        """Close the current tab. Ctrl+W. Refuses if it's the only tab."""
+        if len(self.tabs) == 1:
+            self._append_bubble("purr", "can't close the last tab — open another with Ctrl+T first.", "#f38ba8")
+            return
+        if self._busy:
+            self._append_bubble("purr", "can't close a tab while it's generating. Wait or hit Ctrl+C.", "#f38ba8")
+            return
+        closed = self.tabs.pop(self.current_tab_idx)
+        if self.current_tab_idx >= len(self.tabs):
+            self.current_tab_idx = len(self.tabs) - 1
+        self._sync_current_from_tab()
+        self._refresh_chrome()
+        self.query_one("#chat", TextualMarkdown).update(self._chat_md)
+        self._scroll_to_bottom()
+        self._append_bubble("purr", f"📑 closed tab `{closed.title or closed.agent_name}`.", "#a6e3a1")
+
+    def action_switch_tab(self, idx: int) -> None:
+        """Switch to tab N (1-indexed). Bound to Ctrl+1..9."""
+        if idx < 1 or idx > len(self.tabs):
+            return
+        if idx - 1 == self.current_tab_idx:
+            return
+        self._sync_tab_from_current()
+        self.current_tab_idx = idx - 1
+        self._sync_current_from_tab()
+        self._refresh_chrome()
+        self.query_one("#chat", TextualMarkdown).update(self._chat_md)
+        self._scroll_to_bottom()
+
+    async def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
+        # Ctrl+1..9 → switch tab. Done in on_key because the binding system
+        # can't easily bind to a dynamic count of actions.
+        key = getattr(event, "key", "")
+        if key.startswith("ctrl+") and len(key) == 6 and key[5:].isdigit():
+            n = int(key[5:])
+            if 1 <= n <= 9:
+                self.action_switch_tab(n)
+                event.prevent_default()
+                return
+        # Up arrow in an empty input recalls the last user message (simple history)
+        if key == "up":
+            try:
+                inp = self.query_one("#prompt", Input)
+            except Exception:
+                return
+            if inp.value == "" and self._user_input_history:
+                inp.value = self._user_input_history[-1]
+                inp.cursor_position = len(inp.value)
+                event.prevent_default()
 
     # ---- layout
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield TabBar(id="tab-bar")
         with Horizontal(id="body"):
             yield Sidebar(id="sidebar")
             with Vertical():
@@ -301,6 +487,7 @@ class PurrApp(App):
     def on_mount(self) -> None:
         self.query_one(Header).render_for(self)
         self.query_one(Sidebar).render_for(self)
+        self.query_one(TabBar).render_for(self)
         self._greet()
         # focus the input so keystrokes land there immediately
         self.query_one("#prompt", Input).focus()
@@ -359,8 +546,21 @@ class PurrApp(App):
             return
         if text.startswith("/"):
             self._run_command(text)
-        else:
-            self._chat(text)
+            return
+        # expand @file tokens before sending — if any path is bad, surface
+        # the error in the chat instead of silently dropping the message
+        if "@" in text:
+            from purr.attachments import expand_attachments, AttachmentError
+            try:
+                text = expand_attachments(text)
+            except AttachmentError as e:
+                self._append_bubble("purr", f"📎 {e}", "#f38ba8")
+                return
+        # remember for Up-arrow recall (keep last 50)
+        self._user_input_history.append(text)
+        if len(self._user_input_history) > 50:
+            self._user_input_history = self._user_input_history[-50:]
+        self._chat(text)
 
     # ---- slash commands
 
@@ -400,6 +600,10 @@ class PurrApp(App):
             self._cmd_yolo(rest)
         elif cmd == "/copy":
             self._cmd_copy(rest)
+        elif cmd == "/history":
+            self._cmd_history(rest)
+        elif cmd == "/resume":
+            self._cmd_resume(rest)
         elif cmd == "/new":
             self.action_new_agent()
         else:
@@ -420,10 +624,12 @@ class PurrApp(App):
             "- `/status` — show purr + ollama + model state\n"
             "- `/yolo` — toggle yolo mode (pre-approve all dangerous tools + audit log)\n"
             "- `/copy [last|N|all|selection]` — copy chat text to the system clipboard (`pbcopy` on macOS)\n"
+            "- `/history [search]` — list past chats, optionally filtered by text\n"
+            "- `/resume N` — load the Nth session from the most recent `/history` into a new tab\n"
             "- `/clear` — clear chat  (`ctrl+l`)\n"
             "- `/whoami` — show active agent + model\n"
             "- `/quit` — exit purr  (`ctrl+c`)\n\n"
-            "**keys**: `ctrl+n` new agent · `ctrl+t` next agent · `ctrl+l` clear"
+            "**keys**: `ctrl+n` new agent · `ctrl+t` new tab · `ctrl+w` close tab · `ctrl+1..9` switch tab · `ctrl+r` regenerate · `ctrl+l` clear"
         )
         self._append_bubble("purr", help_md, "#cdd6f4")
 
@@ -528,6 +734,99 @@ class PurrApp(App):
                 "  `/yolo log`                     — show recent audit log",
                 "#cdd6f4",
             )
+
+    def _cmd_history(self, args: list[str]) -> None:
+        """List past chat sessions under ~/.purr/chats/.
+
+        Usage:
+          /history           — all sessions, newest first
+          /history foo       — filter to sessions whose first user message contains "foo"
+          /history agent     — filter to sessions for a specific agent
+        """
+        from purr.history import list_sessions
+        search = " ".join(args).strip() if args else ""
+        agent_filter = None
+        sessions = list_sessions()
+        # if the search term is exactly an agent name, filter by agent
+        if search and self.agents.get(search):
+            sessions = list_sessions(agent=search)
+        elif search:
+            needle = search.lower()
+            sessions = [
+                s for s in sessions
+                if needle in s["title"].lower()
+                or needle in s["agent"].lower()
+                or needle in s["session_id"].lower()
+            ]
+        if not sessions:
+            self._append_bubble("purr", "📜 no past chats found." if not search else f"📜 no past chats match `{search}`.", "#a6e3a1")
+            return
+        # remember the listed set so /resume N can pick from it
+        self._last_history_list = sessions
+        lines = [f"📜 **{len(sessions)} past chat{'s' if len(sessions) != 1 else ''}**", ""]
+        # cap display to the most recent 20 — `/resume` still works on the
+        # full list because we stored it
+        for i, s in enumerate(sessions[:20], 1):
+            import datetime as _dt
+            try:
+                when = _dt.datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                when = "?"
+            glyph = {
+                "friend": "(♥.♥)",
+                "assistant": "(=^.^=)",
+                "planner": "(☼.☼)",
+                "sysadmin": "(>_>)",
+                "general": "(◉_◉)",
+            }.get(self.agents.get(s["agent"]).category if self.agents.get(s["agent"]) else "general", "(◉_◉)")
+            title = s["title"].replace("\n", " ")[:60]
+            lines.append(f"  `{i:>2}`. {glyph} **{s['agent']}** · {s['message_count']} msg · {when}")
+            lines.append(f"      {title}")
+        if len(sessions) > 20:
+            lines.append(f"\n  …{len(sessions) - 20} more (use `/resume N` for any)")
+        lines.append("\n  Type `/resume N` to open the Nth one in a new tab.")
+        self._append_bubble("purr", "\n".join(lines), "#cdd6f4")
+
+    def _cmd_resume(self, args: list[str]) -> None:
+        """Resume a past chat session from the last /history listing."""
+        if not args or not args[0].isdigit():
+            self._append_bubble("purr", "usage: `/resume N` — N is the number from `/history`", "#f38ba8")
+            return
+        n = int(args[0])
+        sessions = getattr(self, "_last_history_list", None)
+        if not sessions:
+            from purr.history import list_sessions
+            sessions = list_sessions()
+        if n < 1 or n > len(sessions):
+            self._append_bubble("purr", f"only {len(sessions)} sessions — pick 1..{len(sessions)}", "#f38ba8")
+            return
+        target = sessions[n - 1]
+        # open a new tab loaded with this session
+        try:
+            from purr.history import load_session
+            agent, msgs = load_session(target["path"])
+        except Exception as e:
+            self._append_bubble("purr", f"couldn't load session: {e}", "#f38ba8")
+            return
+        # save current tab, create new one pointing at the loaded history
+        self._sync_tab_from_current()
+        new = TabState.new(agent, self.current_model)
+        new.agent_name = agent
+        new.title = target["title"] or f"resumed {agent} chat"
+        new.history_path = target["path"]
+        # re-render the loaded messages
+        new.chat_md = self._render_history_to_md(msgs)
+        self.tabs.append(new)
+        self.current_tab_idx = len(self.tabs) - 1
+        self._sync_current_from_tab()
+        self._refresh_chrome()
+        self.query_one("#chat", TextualMarkdown).update(self._chat_md)
+        self._scroll_to_bottom()
+        self._append_bubble(
+            "purr",
+            f"📑 resumed **{agent}** session ({target['message_count']} messages) in tab {self.current_tab_idx+1}.",
+            "#a6e3a1",
+        )
 
     def _cmd_copy(self, args: list[str]) -> None:
         """Copy a recent assistant message to the system clipboard.
@@ -776,6 +1075,10 @@ class PurrApp(App):
             tool_specs = toolmod.specs_for(current.tools)
             schemas = toolmod.schemas_for(current.tools) if tool_specs else None
 
+            # start timer for response-time tracking
+            import time as _time
+            _resp_start = _time.monotonic()
+
             # multi-turn tool loop (max 4 iterations to bound)
             for _turn in range(4):
                 temperature = current.temperature if current.temperature is not None else self.config.temperature
@@ -821,6 +1124,13 @@ class PurrApp(App):
                     self._bubble_anchor = -1
                     self.history.append(ChatMessage(role="assistant", content=full_text))
                     messages.append({"role": "assistant", "content": full_text})
+
+                    # record response time + token estimate
+                    self._last_response_seconds = _time.monotonic() - _resp_start
+                    self._last_response_tokens = sum(
+                        max(1, len(m.get("content", "")) // 4) for m in messages
+                    )
+                    self._refresh_chrome()
 
                     # detect "I have saved..." style claims that were NOT
                     # backed by a tool call this turn. The model may be
@@ -954,6 +1264,67 @@ class PurrApp(App):
         self.query_one("#chat", TextualMarkdown).update("")
         self._greet()
 
+    def action_regenerate(self) -> None:
+        """Regenerate the last assistant response. Ctrl+R.
+
+        Pops the last user+assistant pair from history and re-runs the
+        user message against the model. If the model was mid-stream and
+        the last message is incomplete, we cancel and regenerate.
+        """
+        if self._busy:
+            self._append_bubble("purr", "can't regenerate while a response is streaming. Wait for it to finish or hit Ctrl+C.", "#f38ba8")
+            return
+        msgs = self.history.load()
+        if not msgs:
+            self._append_bubble("purr", "nothing to regenerate — chat is empty.", "#f38ba8")
+            return
+        # find the last user message
+        last_user_idx = None
+        for i in range(len(msgs) - 1, -1, -1):
+            if msgs[i].role == "user" and msgs[i].content:
+                last_user_idx = i
+                break
+        if last_user_idx is None:
+            self._append_bubble("purr", "no user message found to regenerate from.", "#f38ba8")
+            return
+        last_user_text = msgs[last_user_idx].content
+        # truncate the JSONL file to before that user message
+        # (we rewrite the file from the messages we want to keep)
+        keep = msgs[:last_user_idx]
+        try:
+            with open(self.history.path, "w", encoding="utf-8") as f:
+                import json as _json
+                for m in keep:
+                    rec: dict = {"ts": __import__("datetime").datetime.now().isoformat(timespec="seconds"), "role": m.role, "content": m.content}
+                    if m.tool_calls:
+                        rec["tool_calls"] = m.tool_calls
+                    if m.tool_name:
+                        rec["tool_name"] = m.tool_name
+                    f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+        except OSError as e:
+            self._append_bubble("purr", f"couldn't truncate history: {e}", "#f38ba8")
+            return
+        # re-render chat from the truncated history
+        self._chat_md = self._render_history_to_md(keep)
+        self.query_one("#chat", TextualMarkdown).update(self._chat_md)
+        self._scroll_to_bottom()
+        # re-send the last user message
+        self._append_bubble("purr", "↻ regenerating…", "#a6e3a1")
+        self._chat(last_user_text)
+
+    def _render_history_to_md(self, msgs: list) -> str:
+        """Build the chat-md source from a list of messages (for regenerate)."""
+        parts: list[str] = []
+        for m in msgs:
+            if m.role == "user":
+                parts.append(f"**(◉_◉) you**\n\n{m.content}\n")
+            elif m.role == "assistant" and m.content:
+                glyph = ascii_art.agent_glyph(self.active_agent.name)
+                parts.append(f"**{glyph} {self.active_agent.title}**\n\n{m.content}\n")
+            elif m.role == "tool":
+                parts.append(f"🔧  `{m.tool_name}`\n\n    {m.content}\n")
+        return "\n".join(parts)
+
     def action_new_agent(self) -> None:
         from getpass import getuser
         # Quick inline creation; user can /agent edit <name> after.
@@ -984,3 +1355,7 @@ class PurrApp(App):
     def _refresh_chrome(self) -> None:
         self.query_one(Header).render_for(self)
         self.query_one("#sidebar", Sidebar).render_for(self)
+        try:
+            self.query_one(TabBar).render_for(self)
+        except Exception:
+            pass
