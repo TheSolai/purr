@@ -28,7 +28,7 @@ from purr import paths
 
 # Bump this when shipped builtins change meaningfully. The seeder will
 # overwrite the user copy of any builtin whose on-disk version is older.
-BUILTINS_VERSION = 4
+BUILTINS_VERSION = 5
 
 
 @dataclass

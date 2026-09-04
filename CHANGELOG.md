@@ -4,6 +4,17 @@ All notable changes to **purr** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] — 2026-09-04
+
+### Changed
+- **Dross's default model is now `gemma4:12b`** (was `llama3-groq-tool-use:8b`).
+  Gemma 4's 12B-class model (11.9B params) supports tool calling natively in
+  Ollama. If you have `gemma4:14b` installed, change `model` in
+  `~/.purr/agents/dross.json` — the shipped copy uses `gemma4:12b` because
+  that's the closest 14B-class gemma4 available on Ollama today
+  (`gemma4:14b` itself doesn't exist; we tried). Bumped BUILTINS_VERSION
+  to 5 so existing users get the refresh on next launch.
+
 ## [0.2.1] — 2026-09-04
 
 ### Changed — lies now have real consequences

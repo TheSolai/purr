@@ -227,7 +227,8 @@ Purr works with any Ollama model that supports tools. Tested:
 
 | Model | Size | Speed | Notes |
 |---|---|---|---|
-| `llama3-groq-tool-use:8b` | 8B | fast | **default** — purpose-built for tool calling |
+| `gemma4:12b` | 12B | fast | **Dross's default** — Google Gemma 4, native tool support |
+| `llama3-groq-tool-use:8b` | 8B | fast | purpose-built for tool calling |
 | `qwen3:8b` | 8B | fast | good general purpose, has thinking mode |
 | `qwen2.5:3b` | 3B | instant | small + snappy for simple chats |
 | `qwen3:14b` | 14B | slow | smart but thinking mode stalls 60-90s |
