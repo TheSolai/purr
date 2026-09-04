@@ -14,6 +14,10 @@
 
 Purr is a terminal chat app that turns your local Ollama install into a multi-agent Mac assistant. Five built-in personas, 27 tools, dangerous-tool confirmation, streaming Markdown, full keyboard control — and it all runs on your machine. No cloud, no API keys, no telemetry.
 
+<p align="center">
+  <img src="docs/screenshot.svg" alt="purr TUI screenshot — Dross showing the top CPU consumers and killing a runaway process" width="900">
+</p>
+
 ---
 
 ## Quick start

@@ -1,0 +1,34 @@
+# Changelog
+
+All notable changes to **purr** are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/) and the project adheres to
+[Semantic Versioning](https://semver.org/).
+
+## [0.1.0] — 2026-09-04
+
+### Added
+- Initial public release.
+- **5 built-in personas**: Dross (default, the main man), Assistant, Friend (chat-only), Mac Planner, Sysadmin.
+- **27 tools** across 4 groups:
+  - **System** (6): `shell` (refuses `rm`/`sudo`/`dd`/`-rf`), `file_read`, `file_write`, `system_info`, `brew`, `macos_run`, `app_launcher`.
+  - **Productivity** (3): `calendar`, `reminders`, `notes` (all AppleScript-driven, configurable safety).
+  - **Files/Desktop** (12): `mkdir`, `list_dir`, `move_to`, `trash` (recoverable macOS Trash, not `rm`), `find_files`, `disk_usage`, `reveal_in_finder`, `desktop_summary`, `desktop_cleanup` (with `dry_run=True` preview), `open_url`, `download`, `install_app`.
+  - **Activity monitor** (5): `app_status`, `processes` (sortable, filterable), `top_processes`, `process_info`, `kill_process` (DANGEROUS, refuses pid 0/1 and purr itself, defaults to TERM, supports KILL/HUP/INT).
+- **Slash commands**: `/agent list|new|edit|rm|<name>`, `/model`, `/models`, `/tools`, `/role`, `/status`, `/whoami`, `/clear`, `/help`, `/quit`.
+- **Keys**: `ctrl+n` new agent, `ctrl+t` cycle, `ctrl+l` clear, `ctrl+c` quit.
+- **Streaming Markdown** with thinking/typing indicators + auto-scroll.
+- **Safety modal** prompts the user for every dangerous tool call.
+- **Role pill** in the header status bar (`[assistant]`, `[friend]`, `[planner]`, `[admin]`, `[general]`).
+- **Auto-refreshing builtins** — bump `BUILTINS_VERSION` in `agents.py` to roll out changes to all users without clobbering their custom personas.
+- **Plugin extension points** documented in README:
+  - Add a tool: drop a function into `_register_*_tools()` in `src/purr/tools.py`.
+  - Add a persona: JSON in `src/purr/agents_builtin/`, bump `BUILTINS_VERSION`.
+  - Add a slash command: handler in `PurrApp._run_command()` in `src/purr/app.py`.
+- **47 tests** (`pytest tests/`) covering tool registry, agent manager, config, paths.
+- **GitHub Actions CI** (`.github/workflows/ci.yml`) — tests on macOS, Python 3.11/3.12/3.13.
+- **MIT license**.
+- **Default model**: `llama3-groq-tool-use:8b` (purpose-built for tool calling). Configurable via `/model` or `~/.purr/config.toml`.
+
+### Notes
+- Purr is the user-facing shell for the OpenClaw / Dross agent system — Dross is the same persona across purr, OpenClaw, the Dross macOS app, and any other system that uses the OpenClaw soul.
+- All chat / tool state lives locally in `~/.purr/`. No network calls, no telemetry, no API keys needed (Ollama is local).

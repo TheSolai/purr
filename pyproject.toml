@@ -1,17 +1,44 @@
 [project]
 name = "purr"
 version = "0.1.0"
-description = "🐾 purr — funky ASCII TUI for chatting with your local Ollama models. Chat, assign work, make agents. Your Mac's friendly local AI companion."
-authors = [{ name = "Amre" }]
+description = "🐾 purr — funky ASCII TUI for chatting with your local Ollama models. Chat, assign, make agents. Your Mac's friendly local AI companion."
+authors = [{ name = "Amre", email = "amre@thesolai.github.io" }]
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+keywords = ["ollama", "tui", "terminal", "ai", "chat", "assistant", "openclaw", "dross", "macos"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console :: Curses",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Terminals",
+    "Topic :: Utilities",
+]
 dependencies = [
     "ollama>=0.4.0",
     "textual>=0.85.0",
     "rich>=13.9.0",
     "httpx>=0.27.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "build>=0.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/TheSolai/purr"
+Issues = "https://github.com/TheSolai/purr/issues"
+Source = "https://github.com/TheSolai/purr"
 
 [project.scripts]
 purr = "purr.__main__:main"
@@ -27,3 +54,8 @@ packages = ["src/purr"]
 default_model = "llama3-groq-tool-use:8b"
 ollama_host = "http://localhost:11434"
 theme = "catppuccin-mocha"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"
