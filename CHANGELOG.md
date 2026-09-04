@@ -4,6 +4,44 @@ All notable changes to **purr** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] — 2026-09-04
+
+### Changed — lies now have real consequences
+The previous version showed a "⚠️ model said X" warning that the user could
+just ignore. The user said: "no bs, no lies." So the soft warning is gone
+and replaced with a strict enforcement chain.
+
+When the assistant claims an action ("I have saved the file", "Done — wrote
+the file") without any tool call this turn:
+
+1. **Strike-through the response in the chat** — the user sees what was
+   claimed, but it's visibly marked as unverified.
+2. **Drop it from chat history** — the lie never gets added to the JSONL
+   file, so the next model call won't see it as context. The model can't
+   continue to believe its own lie.
+3. **Drop it from the in-memory messages list** — same reason.
+4. **Increment a per-tab strike counter** — shown in the tab bar as
+   `1. dross 1⚠` (1 strike) or `1. dross 2⚠` (2 strikes) or
+   `1. dross 3⚠ 🔒` (3 strikes, locked).
+5. **Lock the tab after 3 strikes** — `_chat()` refuses to send new
+   messages: "🔒 tab locked after 3 lies. I won't send this message —
+   the model has earned a timeout. Run `/forgive` to unlock, or open a
+   fresh tab with Ctrl+T."
+6. **Persistent audit log** at `~/.purr/logs/lies.log` — one line per
+   lie: timestamp, agent, model, claim, tab, strikes. Greppable from
+   another shell with `tail -f`.
+
+### Added
+- **`/forgive`** — clears the strike counter on the current tab and
+  unlocks if locked. Used when the user has decided the model is back on
+  track.
+- **`/lies`** — shows the last 20 entries from the lies audit log.
+- **`src/purr/lies.py`** — the audit log module (mirrors yolo.py's
+  structure: append-only, never crashes the session on error).
+- **7 new lies tests** (record, append, truncate long claims, swallow
+  exceptions, tail empty/log).
+- Total tests: **157** (was 150).
+
 ## [0.2.0] — 2026-09-04
 
 ### Added

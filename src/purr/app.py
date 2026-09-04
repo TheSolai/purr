@@ -76,6 +76,8 @@ class TabState:
     title: str = ""
     busy: bool = False
     session_id: str = ""
+    lie_count: int = 0          # unverified claims this tab
+    locked: bool = False        # true after 3 lies — user must /forgive to unlock
 
     @classmethod
     def new(cls, agent_name: str, model: str) -> "TabState":
@@ -148,6 +150,11 @@ def _detect_uncalled_claim(text: str) -> str | None:
         if m:
             return m.group(0)
     return None
+
+
+# Strike threshold — after this many lies in a single tab, the agent is
+# locked out and cannot call tools until the user runs `/forgive`.
+LIE_STRIKE_LIMIT = 3
 
 
 # ---- widget helpers --------------------------------------------------------
@@ -294,9 +301,17 @@ class TabBar(Static):
             self.update(t)
             return
         for i, tab in enumerate(app.tabs):
-            label = f" {i+1}. {tab.agent_name} "
+            # build label
+            extras: list[str] = []
             if tab.busy:
-                label = f" {i+1}. {tab.agent_name} ⏳ "
+                extras.append("⏳")
+            if tab.lie_count > 0:
+                extras.append(f"{tab.lie_count}⚠")
+            if tab.locked:
+                extras.append("🔒")
+            label = f" {i+1}. {tab.agent_name} "
+            if extras:
+                label += " ".join(extras) + " "
             style_active = "bold reverse #f5c2e7"
             style_inactive = "#585b70"
             if i == app.current_tab_idx:
@@ -531,6 +546,65 @@ class PurrApp(App):
         self.query_one("#chat", TextualMarkdown).update(self._chat_md)
         self._scroll_to_bottom()
 
+    def _enforce_lie_consequence(self, full_text: str, claim: str) -> None:
+        """Apply real consequences when the assistant claims an action it
+        never took via a tool call this turn. Strikes through the response,
+        drops it from history, increments the tab's strike count, logs to
+        the lies audit log, and locks the tab after 3 strikes.
+
+        The user sees a clear 🚨 banner. The model never gets to see the
+        false claim in subsequent context — so it can't continue to believe
+        its own lie.
+        """
+        from purr import lies as liesmod
+
+        tab = self.tabs[self.current_tab_idx]
+        tab.lie_count += 1
+        if tab.lie_count >= LIE_STRIKE_LIMIT and not tab.locked:
+            tab.locked = True
+        liesmod.record(
+            agent=self.active_agent.name,
+            model=self.current_model,
+            claim=claim,
+            tab_idx=self.current_tab_idx,
+            strikes=tab.lie_count,
+        )
+
+        # 1) strike through the response in the chat
+        glyph = ascii_art.agent_glyph(self.active_agent.name)
+        struck = f"**{glyph} {self.active_agent.title}**\n\n~~{full_text}~~\n"
+        if self._bubble_anchor >= 0:
+            self._chat_md = self._chat_md[: self._bubble_anchor] + struck
+        else:
+            sep = "\n" if self._chat_md else ""
+            self._chat_md += sep + struck
+
+        # 2) append a red banner explaining the strike
+        if tab.locked:
+            extra = (
+                f"\n\n🔒 **{LIE_STRIKE_LIMIT} STRIKES — this tab is LOCKED.** "
+                f"No more tool calls will run. Run `/forgive` to clear strikes and unlock, "
+                f"or `/lies` to see the audit log."
+            )
+        else:
+            remaining = LIE_STRIKE_LIMIT - tab.lie_count
+            extra = (
+                f"\n\n⚠️ **{remaining} more lie{'s' if remaining != 1 else ''} and this tab is locked.** "
+                f"`/forgive` to forgive, `/lies` to see the audit log."
+            )
+        banner = (
+            f"\n\n🚨 **LIE DETECTED** — {self.active_agent.title} claimed "
+            f"`\"{claim}\"` but no tool was called this turn. The response above "
+            f"is struck through, has been dropped from chat history, and will NOT "
+            f"be sent back to the model in future turns. "
+            f"Strike {tab.lie_count}/{LIE_STRIKE_LIMIT} on this tab."
+            f"{extra}"
+        )
+        self._chat_md += banner
+        self.query_one("#chat", TextualMarkdown).update(self._chat_md)
+        self._scroll_to_bottom()
+        self._refresh_chrome()
+
     def _scroll_to_bottom(self) -> None:
         try:
             self.query_one("#chat-scroll", VerticalScroll).scroll_end(animate=False)
@@ -604,6 +678,10 @@ class PurrApp(App):
             self._cmd_history(rest)
         elif cmd == "/resume":
             self._cmd_resume(rest)
+        elif cmd == "/forgive":
+            self._cmd_forgive()
+        elif cmd == "/lies":
+            self._cmd_lies()
         elif cmd == "/new":
             self.action_new_agent()
         else:
@@ -626,6 +704,8 @@ class PurrApp(App):
             "- `/copy [last|N|all|selection]` — copy chat text to the system clipboard (`pbcopy` on macOS)\n"
             "- `/history [search]` — list past chats, optionally filtered by text\n"
             "- `/resume N` — load the Nth session from the most recent `/history` into a new tab\n"
+            "- `/forgive` — clear lies-strike counter on this tab and unlock if locked\n"
+            "- `/lies` — show recent entries from the lies audit log\n"
             "- `/clear` — clear chat  (`ctrl+l`)\n"
             "- `/whoami` — show active agent + model\n"
             "- `/quit` — exit purr  (`ctrl+c`)\n\n"
@@ -828,10 +908,35 @@ class PurrApp(App):
             "#a6e3a1",
         )
 
+    def _cmd_forgive(self) -> None:
+        """Clear the strike counter on the current tab and unlock if locked.
+
+        The user is explicitly forgiving past lies — usually after reading
+        the audit log and deciding the model was actually right (or after
+        switching to a better prompt).
+        """
+        tab = self.tabs[self.current_tab_idx]
+        was_locked = tab.locked
+        old_count = tab.lie_count
+        tab.lie_count = 0
+        tab.locked = False
+        if old_count == 0:
+            self._append_bubble("purr", "no strikes to forgive. you're a forgiving soul. 🕊️", "#a6e3a1")
+            return
+        msg = f"🕊️  forgiven — cleared {old_count} strike{'s' if old_count != 1 else ''} on this tab."
+        if was_locked:
+            msg += " Tab unlocked. Tool calls work again."
+        self._append_bubble("purr", msg, "#a6e3a1")
+        self._refresh_chrome()
+
+    def _cmd_lies(self) -> None:
+        """Show the last 20 entries from the lies audit log."""
+        from purr import lies as liesmod
+        tail = liesmod.tail(20)
+        self._append_bubble("purr", f"**lies.log (last 20)**\n\n```\n{tail}\n```", "#cdd6f4")
+
     def _cmd_copy(self, args: list[str]) -> None:
         """Copy a recent assistant message to the system clipboard.
-
-        Usage:
           /copy            — last assistant message
           /copy last       — same as no arg
           /copy N          — Nth most recent assistant message (1-indexed)
@@ -1044,6 +1149,17 @@ class PurrApp(App):
         if self._busy:
             self._append_bubble("purr", "still working on the last reply — press `esc` to interrupt.", "#f38ba8")
             return
+        # refuse to proceed if the tab is locked from too many lies
+        tab = self.tabs[self.current_tab_idx]
+        if tab.locked:
+            self._append_bubble(
+                "purr",
+                f"🔒 **tab locked after {tab.lie_count} lies.** "
+                f"I won't send this message — the model has earned a timeout. "
+                f"Run `/forgive` to unlock, or open a fresh tab with `Ctrl+T`.",
+                "#f38ba8",
+            )
+            return
         self._busy = True
         self._append_bubble("user", user_text, "#89dceb")
         self.run_worker(self._chat_async(user_text), exclusive=True)
@@ -1110,7 +1226,27 @@ class PurrApp(App):
 
                 # finalize assistant message
                 if not pending_tool_calls:
-                    # done — replace the in-progress bubble with the final one (no caret, no "typing…" label)
+                    # detect "I have saved..." style claims that were NOT
+                    # backed by a tool call this turn. The model is lying —
+                    # enforce consequences, not a soft warning.
+                    lie_claim: str | None = None
+                    if not tools_called_this_turn and full_text.strip():
+                        lie_claim = _detect_uncalled_claim(full_text)
+
+                    if lie_claim:
+                        # LIE: render with strike-through, drop from history,
+                        # increment tab strike count, log, possibly lock.
+                        self._enforce_lie_consequence(full_text, lie_claim)
+                        # don't append to history, don't append to messages
+                        self._bubble_anchor = -1
+                        self._last_response_seconds = _time.monotonic() - _resp_start
+                        self._last_response_tokens = sum(
+                            max(1, len(m.get("content", "")) // 4) for m in messages
+                        )
+                        self._refresh_chrome()
+                        break
+
+                    # HONEST: replace the in-progress bubble with the final one
                     if full_text.strip():
                         glyph = ascii_art.agent_glyph(self.active_agent.name)
                         final = f"**{glyph} {self.active_agent.title}**\n\n{full_text}\n"
@@ -1131,21 +1267,6 @@ class PurrApp(App):
                         max(1, len(m.get("content", "")) // 4) for m in messages
                     )
                     self._refresh_chrome()
-
-                    # detect "I have saved..." style claims that were NOT
-                    # backed by a tool call this turn. The model may be
-                    # hallucinating the action. Warn the user.
-                    if not tools_called_this_turn:
-                        claim = _detect_uncalled_claim(full_text)
-                        if claim:
-                            self._append_bubble(
-                                "purr",
-                                f"⚠️  **{self.active_agent.title} said \"{claim}\" but no tool was called this turn.** "
-                                f"If they claimed a side-effect (saved file, sent email, killed process, etc.), "
-                                f"it didn't actually happen — the model hallucinated the action. "
-                                f"Try rephrasing: \"actually use the file_write tool\" or \"call the tool, don't just describe it\".",
-                                "#f38ba8",
-                            )
                     break
 
                 # handle tool calls

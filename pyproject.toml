@@ -1,6 +1,6 @@
 [project]
 name = "purr"
-version = "0.2.0"
+version = "0.2.1"
 description = "🐾 purr — funky ASCII TUI for chatting with your local Ollama models. Chat, assign, make agents. Your Mac's friendly local AI companion."
 authors = [{ name = "Amre", email = "amre@thesolai.github.io" }]
 readme = "README.md"
