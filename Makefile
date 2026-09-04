@@ -1,4 +1,4 @@
-.PHONY: install test lint smoke run clean publish-dryrun publish
+.PHONY: install test lint smoke run clean screenshot publish-dryrun publish
 
 PYTHON ?= python3
 VENV ?= .venv
@@ -21,6 +21,12 @@ smoke:
 
 run:
 	$(BIN)/python -m purr
+
+# Re-render docs/screenshot.png from a representative TUI state.
+# Needs Pillow (in [dev] extras). macOS only — uses /System/Library/Fonts/Menlo.ttc.
+screenshot:
+	$(BIN)/python scripts/render_screenshot_png.py
+	$(BIN)/python scripts/capture_screenshot.py
 
 clean:
 	rm -rf build/ dist/ *.egg-info .pytest_cache .mypy_cache .ruff_cache

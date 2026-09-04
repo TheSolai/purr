@@ -1,0 +1,37 @@
+# Example ~/.purr/pypirc — copy to ~/.pypirc and fill in your token.
+#
+# Two paths to publish purr to PyPI:
+#
+# A. Trusted publishing (recommended) — set up once on PyPI:
+#    https://pypi.org/manage/project/purr/settings/publishing/
+#    Add a "pending publisher" pointing at the GitHub repo TheSolai/purr
+#    on the main branch, workflow file .github/workflows/publish.yml.
+#    No tokens needed. CI does the upload.
+#
+# B. Manual API token — fastest for one-off uploads:
+#    Create a token at https://pypi.org/manage/account/token/
+#    (scope: "project:purr" once the project exists, or "entire account"
+#    for the first upload).
+#    Then either paste it into ~/.pypirc like the example below, or set
+#    TWINE_USERNAME=__token__ and TWINE_PASSWORD=pypi-... in your shell.
+
+[distutils]
+index-servers =
+    pypi
+    testpypi
+
+[pypi]
+repository = https://upload.pypi.org/legacy/
+username = __token__
+password = pypi-AgE...your-token-here...
+
+[testpypi]
+repository = https://test.pypi.org/legacy/
+username = __token__
+password = pypi-AgE...your-testpypi-token...
+
+# Then:
+#   make publish-dryrun   # builds sdist + wheel into dist/
+#   make publish          # uploads to PyPI
+#   # or for a dry run against testpypi:
+#   twine upload --repository testpypi dist/*

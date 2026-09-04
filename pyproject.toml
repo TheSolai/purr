@@ -1,6 +1,6 @@
 [project]
 name = "purr"
-version = "0.1.1"
+version = "0.1.2"
 description = "🐾 purr — funky ASCII TUI for chatting with your local Ollama models. Chat, assign, make agents. Your Mac's friendly local AI companion."
 authors = [{ name = "Amre", email = "amre@thesolai.github.io" }]
 readme = "README.md"
@@ -33,6 +33,7 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "build>=0.10",
+    "Pillow>=10.0",  # for scripts/render_screenshot_png.py
 ]
 
 [project.urls]

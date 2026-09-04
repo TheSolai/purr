@@ -12,10 +12,12 @@
    (__(___)_(___)__)
 ```
 
-Purr is a terminal chat app that turns your local Ollama install into a multi-agent Mac assistant. Five built-in personas, 27 tools, dangerous-tool confirmation, streaming Markdown, full keyboard control — and it all runs on your machine. No cloud, no API keys, no telemetry.
+Purr is a terminal chat app that turns your local Ollama install into a multi-agent Mac assistant. Five built-in personas, 29 tools, dangerous-tool confirmation, streaming Markdown, full keyboard control — and it all runs on your machine. No cloud, no API keys, no telemetry.
 
 <p align="center">
-  <img src="docs/screenshot.svg" alt="purr TUI screenshot — Dross showing the top CPU consumers and killing a runaway process" width="900">
+  <img src="docs/screenshot.png" alt="purr TUI screenshot — Dross showing the top CPU consumers and killing a runaway process" width="900">
+  <br>
+  <a href="docs/screenshot.svg">SVG version</a> · <a href="examples/">example personas</a>
 </p>
 
 ---
@@ -249,8 +251,35 @@ Switch any time with `/model <name>`.
 ## Tested on
 
 - macOS 15+ (Apple Silicon)
-- Python 3.11, 3.12, 3.14
+- Python 3.11, 3.12, 3.13
 - Ollama 0.5+ (any version with native tool support)
+
+---
+
+## Publishing to PyPI
+
+Purr is pip-installable today from this repo. To cut an official release:
+
+```bash
+# 1. Bump the version in pyproject.toml + src/purr/__init__.py + CHANGELOG.md
+# 2. Build sdist + wheel locally and inspect
+make publish-dryrun
+ls dist/
+
+# 3a. Trusted publishing (recommended) — once, on PyPI:
+#     https://pypi.org/manage/project/purr/settings/publishing/
+#     Add GitHub repo TheSolai/purr, workflow .github/workflows/publish.yml.
+#     Tag a release and CI does the upload.
+git tag v0.1.2 && git push --tags
+
+# 3b. Or upload manually with a token
+cp .pypirc.example ~/.pypirc   # fill in the token
+make publish
+```
+
+See [`.pypirc.example`](.pypirc.example) for the full pypirc template, including the
+[PyPI Trusted Publishers](https://docs.pypi.org/trusted-publishers/) setup
+(no long-lived secrets).
 
 ---
 

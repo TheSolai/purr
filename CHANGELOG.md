@@ -4,6 +4,28 @@ All notable changes to **purr** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] — 2026-09-04
+
+### Added
+- **`examples/personas/`** — four copy-paste-and-customize starter personas:
+  Researcher (citation-first deep dives), Coder (read-edit-test loops on real code),
+  Triage (Desktop + Downloads cleanup), Writer (drafts + edits). Each is a plain JSON
+  you can `cp` into `~/.purr/agents/` and tweak. See [`examples/README.md`](examples/README.md).
+- **`docs/screenshot.png`** — PNG render of the TUI via Pillow + Menlo (no SVG→PNG
+  conversion needed). 1056×744, regenerable with `make screenshot`. Companion to
+  `docs/screenshot.svg` for cases where raster is preferred (GitHub social cards, etc).
+- **`tests/test_streaming.py`** — 7 new tests with a real `http.server`-based mock
+  Ollama on a random port. Exercises the full httpx streaming path, not just the
+  parser. Covers text-only, tool calls, error status, empty streams, and `health()`.
+- **`.pypirc.example`** — template for PyPI upload + a note on Trusted Publishers.
+- **`make screenshot`** — regenerates both the SVG and PNG.
+- **`Pillow>=10`** moved into the `[dev]` extras (only used by the screenshot script).
+- **README** now points at the PNG screenshot and links the publish steps.
+
+### Notes
+- Total tests: **60** (was 53) — all green locally and on CI.
+- `make publish-dryrun` builds a clean sdist + wheel (`purr-0.1.2-py3-none-any.whl` + `.tar.gz`).
+
 ## [0.1.1] — 2026-09-04
 
 ### Added
