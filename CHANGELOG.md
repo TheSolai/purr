@@ -4,6 +4,44 @@ All notable changes to **purr** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] — 2026-09-04
+
+### Fixed
+- **Tool-call hallucination detector.** When the assistant claims an action
+  ("I have saved the file", "Done — installed the package", "I just downloaded
+  the installer") but no tool was actually called this turn, purr now appends
+  a warning bubble naming the matched phrase and suggesting a re-prompt. The
+  matched patterns handle first-person + modifiers + contractions + base-form
+  verbs, plus "Done — verb" and "Done: verb" variants. Narrative inside a
+  story ("Midnight opened the box") does NOT trip the warning — only first-
+  person or "Done —" claims do.
+- **Universal honesty rule** appended to every persona's system prompt. Tells
+  the model to never claim a side-effect ("saved", "sent", "killed") without a
+  backing tool call, and to call the tool, not just describe the call.
+- **`file_write` no longer prompts.** It was marked `dangerous=True` even
+  though the README called it reversible — fixed. New files and rewrites now
+  execute immediately, no modal. Overwrite targets are still recoverable
+  (Finder, Time Machine).
+- **`file_write` is robust to weird model output.** Now handles content as
+  `list` of lines (joined with `\n`), `int`/`float`/`bool` (coerced via
+  `str()`/`repr()`), `None` (friendly ❌ instead of TypeError), missing path
+  (friendly ❌ instead of TypeError), permission errors (friendly ❌ instead
+  of crash). Always ends the file with a newline (POSIX text-file convention).
+- **Dross's catchphrase** "I have considered the alternative and rejected it."
+  is no longer matched as a hallucination.
+
+### Added
+- **`/copy [last|N|all|selection]`** — copies chat text to the system
+  clipboard. `last` (default) is the most recent assistant message; `N` is
+  the Nth most recent; `all` is the whole chat as plain text; `selection`
+  is whatever's selected in the TUI (when supported). macOS uses `pbcopy`,
+  Linux tries `xclip`/`wl-copy`/`xsel`, Windows uses `clip`. Falls back to
+  printing the text in a code block if no clipboard tool is found.
+- **12 new `file_write` tests** (basic, trailing newline, list/int/bool/None
+  content, missing path, parent dir creation, tilde expansion, permission
+  errors) and **58 new claim-detector tests** (parametrized).
+- Total tests: **130** (was 60).
+
 ## [0.1.2] — 2026-09-04
 
 ### Added

@@ -62,6 +62,66 @@ from purr import tools as toolmod
 from purr import yolo as yolomod
 
 
+# ---- universal persona rules (appended to every persona's system prompt) ---
+# Without this, models sometimes claim to have done things they never did
+# (e.g. "I have saved this story to ~/Desktop/tail.md" without ever calling
+# file_write). The user sees the chat, walks away, and the file doesn't exist.
+# This rule is universal — every persona gets it.
+_PURR_UNIVERSAL_RULES = """
+
+# purr universal rules (apply to EVERY agent persona)
+
+## Honesty about actions
+NEVER claim an action was taken unless you actually called a tool to do it in this turn.
+- "I have saved the file" is only true if you just called `file_write` and it returned `✅ wrote ... bytes to ...`.
+- "I have downloaded X" is only true if `download` returned a success path.
+- "I have killed the process" is only true if `kill_process` returned a success message.
+- "I have sent the email" / "I have created the event" / "I have added the reminder" — same rule.
+If you did NOT call the tool, you did NOT do the thing. Say so plainly: "I haven't saved it yet — calling file_write now" and then call the tool.
+The user can see your tool calls in the chat. Lying is detectable and a worse failure than asking for clarification.
+
+## When you must call a tool
+- "save", "write", "create file", "make a note", "send" → call the tool, then confirm.
+- "search", "fetch", "look up" → call `web_search` or `web_fetch`, then summarize what came back.
+- "kill", "delete", "trash", "move", "rename" → call the tool, then confirm the action.
+- "open", "launch", "run" → call the tool, then confirm.
+When the user asks for a side-effect, the side-effect MUST come from a tool call, not from your prose.
+
+## What you never do
+- Never pad a short answer with fake tool-call narration ("I will now use file_write to..." — just call it).
+- Never invent file paths, URLs, or tool outputs. If a tool call failed, say so.
+- Never claim success when the tool returned `❌` or `⛔`.
+"""
+
+
+# Detect "I did X" claims in the assistant's prose that don't match any actual
+# tool call this turn. If we find one, warn the user — the model may be
+# hallucinating an action it never took.
+_CLAIM_PATTERNS = [
+    # First-person action claim — the model saying "I did X" or "I have done X"
+    # or "I will do X". Catches past tense, past participle, and base form
+    # (e.g. "I will save" → base form is "save", past is "saved", participle is
+    # "saved"). Multiple modifiers in any order (e.g. "I have just downloaded",
+    # "I've just saved"). Contractions: I've, I'll, I'd, I'm going to.
+    r"\bI(?:[\s']+(?:have|had|will|should|would|ve|ll|d|just|also|now))*\s+(?:saved|wrote|written|created|made|deleted|removed|moved|renamed|downloaded|installed|sent|added|killed|launched|opened|fetched|searched|copied|updated|set|configured|cleaned|emailed|replied|booked|scheduled|filed|wiped|uninstalled|put|placed|parked|stored|reset|restarted|rebooted|stopped|started|toggled|save|write|create|make|delete|remove|move|rename|download|install|send|add|kill|launch|open|fetch|search|copy|update|configure|clean|email|reply|book|schedule|file|wipe|uninstall|place|park|store|reset|restart|reboot|stop|start|toggle)\b",
+    # "Done — wrote 235 bytes" / "Done - installed the package" / "Done: created folder"
+    # Whitespace before the separator is optional (catches "Done:created"),
+    # whitespace after the separator is required (so "Done." doesn't match).
+    r"\bDone\s*[:\u2014\u2013\-]\s+(?:saved|wrote|written|created|made|deleted|removed|moved|renamed|downloaded|installed|sent|added|killed|launched|opened|fetched|searched|copied|cleaned|emailed|replied|booked|scheduled|filed|wiped|uninstalled|put|placed|stored|reset|restarted|rebooted|stopped|started|toggled|save|write|create|make|delete|remove|move|rename|download|install|send|add|kill|launch|open|fetch|search|copy|update|configure|clean|email|reply|book|schedule|file|wipe|uninstall|place|park|store|reset|restart|reboot|stop|start|toggle)\b",
+]
+
+
+def _detect_uncalled_claim(text: str) -> str | None:
+    """Return a warning string if the assistant claims an action that was
+    not backed by a tool call this turn. Else None."""
+    import re
+    for pat in _CLAIM_PATTERNS:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            return m.group(0)
+    return None
+
+
 # ---- widget helpers --------------------------------------------------------
 
 class Header(Static):
@@ -338,6 +398,8 @@ class PurrApp(App):
             self._show_status()
         elif cmd == "/yolo":
             self._cmd_yolo(rest)
+        elif cmd == "/copy":
+            self._cmd_copy(rest)
         elif cmd == "/new":
             self.action_new_agent()
         else:
@@ -357,6 +419,7 @@ class PurrApp(App):
             "- `/role` — show the active agent's category + permissions\n"
             "- `/status` — show purr + ollama + model state\n"
             "- `/yolo` — toggle yolo mode (pre-approve all dangerous tools + audit log)\n"
+            "- `/copy [last|N|all|selection]` — copy chat text to the system clipboard (`pbcopy` on macOS)\n"
             "- `/clear` — clear chat  (`ctrl+l`)\n"
             "- `/whoami` — show active agent + model\n"
             "- `/quit` — exit purr  (`ctrl+c`)\n\n"
@@ -464,6 +527,119 @@ class PurrApp(App):
                 "  `/yolo off`                     — disable (instant)\n"
                 "  `/yolo log`                     — show recent audit log",
                 "#cdd6f4",
+            )
+
+    def _cmd_copy(self, args: list[str]) -> None:
+        """Copy a recent assistant message to the system clipboard.
+
+        Usage:
+          /copy            — last assistant message
+          /copy last       — same as no arg
+          /copy N          — Nth most recent assistant message (1-indexed)
+          /copy all        — entire chat as plain text
+          /copy selection  — currently selected text in the chat widget
+                              (if the terminal supports it)
+        """
+        # pull assistant messages newest first
+        messages = self.history.load() or self.history.messages
+        assistants = [m for m in messages if m.role == "assistant" and m.content]
+        if not assistants:
+            self._append_bubble("purr", "no assistant message to copy yet.", "#f38ba8")
+            return
+
+        sub = (args[0].lower() if args else "last")
+        if sub in ("last", ""):
+            text = assistants[-1].content
+            label = "last assistant message"
+        elif sub.isdigit():
+            n = int(sub)
+            if n < 1 or n > len(assistants):
+                self._append_bubble(
+                    "purr",
+                    f"only {len(assistants)} assistant message{'s' if len(assistants) != 1 else ''} — pick 1..{len(assistants)}",
+                    "#f38ba8",
+                )
+                return
+            text = assistants[-n].content
+            label = f"assistant message #{n} from the end"
+        elif sub == "all":
+            lines = []
+            for m in messages:
+                if m.role == "user":
+                    lines.append(f"YOU: {m.content}\n")
+                elif m.role == "assistant" and m.content:
+                    lines.append(f"ASSISTANT: {m.content}\n")
+                elif m.role == "tool":
+                    lines.append(f"[tool:{m.tool_name}] {m.content}\n")
+            text = "\n".join(lines)
+            label = f"full chat ({len(messages)} message{'s' if len(messages) != 1 else ''})"
+        elif sub in ("selection", "sel"):
+            # try Textual's selection mechanism
+            sel = getattr(self.screen, "selection", None) or getattr(self, "selection", None)
+            if not sel:
+                self._append_bubble(
+                    "purr",
+                    "no active text selection — your terminal may not support "
+                    "mouse selection in Textual. Use `/copy last` instead, or "
+                    "select in tmux with `prefix [` then space+arrows.",
+                    "#f38ba8",
+                )
+                return
+            text = str(sel)
+            label = "selected text"
+        else:
+            self._append_bubble(
+                "purr",
+                "usage: `/copy [last|N|all|selection]`\n"
+                "  no arg    — copy the last assistant message\n"
+                "  N         — copy the Nth most recent assistant message\n"
+                "  all       — copy the entire chat as plain text\n"
+                "  selection — copy whatever's currently selected in the TUI",
+                "#f38ba8",
+            )
+            return
+
+        # write to clipboard — macOS pbcopy, Linux xclip/wl-copy, Windows clip
+        import platform, shutil, subprocess
+        system = platform.system()
+        cmds: list[list[str]] = []
+        if system == "Darwin":
+            cmds = [["pbcopy"]]
+        elif system == "Windows":
+            cmds = [["clip"]]
+        else:
+            for c in (["xclip", "-selection", "clipboard"], ["wl-copy"], ["xsel", "--clipboard", "--input"]):
+                if shutil.which(c[0]):
+                    cmds = [c]
+                    break
+
+        if not cmds:
+            self._append_bubble(
+                "purr",
+                f"📋 {label} ({len(text):,} chars) — no clipboard tool found, "
+                f"printing below:\n\n```\n{text[:2000]}{'…' if len(text) > 2000 else ''}\n```",
+                "#cdd6f4",
+            )
+            return
+
+        try:
+            proc = subprocess.run(cmds[0], input=text.encode("utf-8"), check=True)
+            preview = text[:80].replace("\n", " ⏎ ")
+            more = "…" if len(text) > 80 else ""
+            self._append_bubble(
+                "purr",
+                f"📋 copied {label} to clipboard ({len(text):,} chars)\n\n"
+                f"  preview: `{preview}{more}`\n\n"
+                f"paste with `⌘V` or `/copy selection` to grab something else.",
+                "#a6e3a1",
+            )
+        except Exception as e:
+            self._append_bubble(
+                "purr",
+                f"❌ clipboard write failed: {e}\n\n"
+                f"({label}, {len(text):,} chars — first 400 below)\n\n"
+                f"```\n{text[:400]}\n```",
+                "#f38ba8",
             )
 
     def _cmd_agent(self, args: list[str]) -> None:
@@ -581,7 +757,8 @@ class PurrApp(App):
 
             # build message list
             history = self.history.load()
-            messages: list[dict] = [{"role": "system", "content": current.system_prompt}]
+            sys_prompt = current.system_prompt + _PURR_UNIVERSAL_RULES
+            messages: list[dict] = [{"role": "system", "content": sys_prompt}]
             for m in history[-self.config.max_history_messages:]:
                 if m.role in ("user", "assistant", "tool"):
                     d = {"role": m.role, "content": m.content}
@@ -590,6 +767,10 @@ class PurrApp(App):
                     messages.append(d)
             messages.append({"role": "user", "content": user_text})
             self.history.append(ChatMessage(role="user", content=user_text))
+
+            # track tool calls made during this user turn so we can detect
+            # when the assistant's prose claims an action but no tool backed it
+            tools_called_this_turn: list[str] = []
 
             # tool schemas
             tool_specs = toolmod.specs_for(current.tools)
@@ -640,6 +821,21 @@ class PurrApp(App):
                     self._bubble_anchor = -1
                     self.history.append(ChatMessage(role="assistant", content=full_text))
                     messages.append({"role": "assistant", "content": full_text})
+
+                    # detect "I have saved..." style claims that were NOT
+                    # backed by a tool call this turn. The model may be
+                    # hallucinating the action. Warn the user.
+                    if not tools_called_this_turn:
+                        claim = _detect_uncalled_claim(full_text)
+                        if claim:
+                            self._append_bubble(
+                                "purr",
+                                f"⚠️  **{self.active_agent.title} said \"{claim}\" but no tool was called this turn.** "
+                                f"If they claimed a side-effect (saved file, sent email, killed process, etc.), "
+                                f"it didn't actually happen — the model hallucinated the action. "
+                                f"Try rephrasing: \"actually use the file_write tool\" or \"call the tool, don't just describe it\".",
+                                "#f38ba8",
+                            )
                     break
 
                 # handle tool calls
@@ -651,6 +847,7 @@ class PurrApp(App):
                 for tc in pending_tool_calls:
                     fn = tc.get("function") or {}
                     tool_name = fn.get("name", "")
+                    tools_called_this_turn.append(tool_name)
                     raw_args = fn.get("arguments", {})
                     if isinstance(raw_args, str):
                         try:

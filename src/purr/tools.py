@@ -83,10 +83,39 @@ def file_read(path: str, max_bytes: int = 20_000) -> str:
 
 
 def file_write(path: str, content: str) -> str:
+    """Write text to a file. Creates parent dirs. Always ends with a newline
+    (POSIX text-file convention — `tail -f`, `wc -l`, git, etc. expect it).
+
+    Accepts content as: str, list of lines, int, float, bool, or None —
+    non-strings are coerced via repr/str so the model never gets a hard crash
+    just because it sent `content=["line1", "line2"]`.
+    """
+    if not path or not isinstance(path, str):
+        return f"❌ file_write: `path` must be a non-empty string, got {type(path).__name__}"
+    if content is None:
+        return f"❌ file_write: `content` is None — nothing to write. Pass a string."
+    if isinstance(content, (list, tuple)):
+        content = "\n".join(str(x) for x in content)
+    elif isinstance(content, bool):
+        # bool is a subclass of int — handle it explicitly so True/False don't write as "1"/""
+        content = "true" if content else "false"
+    elif not isinstance(content, str):
+        content = str(content)
+    # POSIX text files end with a newline. If the model didn't include one,
+    # add it. This makes the file look right in `cat`, `wc -l`, editors, etc.
+    if content and not content.endswith("\n"):
+        content = content + "\n"
     p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
-    return f"✅ wrote {len(content)} bytes to {p}"
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    except PermissionError as e:
+        return f"❌ file_write: permission denied for {p} ({e})"
+    except OSError as e:
+        return f"❌ file_write: {e}"
+    n_bytes = len(content.encode("utf-8"))
+    n_lines = content.count("\n")
+    return f"✅ wrote {n_bytes} bytes ({n_lines} line{'s' if n_lines != 1 else ''}) to {p}"
 
 
 def system_info() -> str:
@@ -1116,9 +1145,12 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "file_write": ToolSpec(
         name="file_write",
-        description="Write a string to a file. Will prompt for confirmation.",
+        description=(
+            "Write text to a file. Creates parent dirs. Reversible (user can edit/undo). "
+            "Always writes a trailing newline (POSIX text-file convention)."
+        ),
         fn=file_write,
-        dangerous=True,
+        dangerous=False,  # reversible — README says it doesn't prompt; honor that
         schema={
             "type": "function",
             "function": {

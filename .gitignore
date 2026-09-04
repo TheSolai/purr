@@ -42,3 +42,8 @@ htmlcov/
 .purr-test/
 test_output/
 *.log
+
+# Stray files from file_write tests where tilde didn't expand
+Desktop/
+tail.md
+*.md.bak

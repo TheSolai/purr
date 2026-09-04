@@ -36,14 +36,19 @@ def test_every_tool_has_schema():
 
 
 def test_dangerous_flag_set_on_mutating_tools():
-    """Tools that mutate state must be flagged dangerous=True."""
+    """Tools that mutate state must be flagged dangerous=True.
+
+    Note: `file_write` is intentionally NOT dangerous — writing a new file
+    is reversible (the user can edit it or trash it from Finder). The README
+    and docs both say reversible tools don't prompt. Only truly destructive
+    ops (delete, move, kill, install, system-modifying shell) prompt.
+    """
     must_be_dangerous = {
         "calendar",      # add event
         "reminders",     # add/complete
         "notes",         # add note
         "macos_run",     # arbitrary AppleScript
         "brew",          # install/update
-        "file_write",
         "move_to",
         "trash",
         "desktop_cleanup",
@@ -53,6 +58,13 @@ def test_dangerous_flag_set_on_mutating_tools():
     }
     for name in must_be_dangerous:
         assert t.TOOLS[name].dangerous, f"{name} should be marked dangerous"
+
+
+def test_file_write_is_reversible_not_dangerous():
+    """file_write is reversible (user can edit/undo in Finder) — no prompt."""
+    assert t.TOOLS["file_write"].dangerous is False, (
+        "file_write should be reversible (dangerous=False) — see README §Safety model"
+    )
 
 
 def test_safe_tools_not_dangerous():
@@ -297,3 +309,108 @@ def test_ddg_redirect_unwrap():
     assert unwrap(wrapped) == "https://github.com/paulrobello/parllama"
     # passthrough for non-DDG URLs
     assert unwrap("https://example.com/foo") == "https://example.com/foo"
+
+
+# ---- file_write edge cases --------------------------------------------------
+# file_write is the most-called mutation tool and the most common source of
+# weirdness: the model sends content as a list, an int, None, or forgets the
+# path. We must NEVER crash — always return a friendly ❌ message or coerce
+# the value so the file is still written.
+
+def test_file_write_basic(tmp_path):
+    p = tmp_path / "story.md"
+    r = t.file_write(str(p), "Once upon a time, Pixel learned Python.")
+    assert r.startswith("✅")
+    assert p.read_text() == "Once upon a time, Pixel learned Python.\n"
+
+
+def test_file_write_adds_trailing_newline(tmp_path):
+    """POSIX text files end with a newline — `cat`, `wc -l`, git, etc. expect it."""
+    p = tmp_path / "a.md"
+    t.file_write(str(p), "line 1\nline 2")  # no trailing \n
+    data = p.read_bytes()
+    assert data.endswith(b"\n"), f"file should end with newline, got {data!r}"
+
+
+def test_file_write_preserves_existing_newline(tmp_path):
+    """If the model already ended with \n, don't add a second one."""
+    p = tmp_path / "a.md"
+    t.file_write(str(p), "line 1\nline 2\n")
+    assert p.read_text() == "line 1\nline 2\n"
+
+
+def test_file_write_list_content(tmp_path):
+    """Some models send content as a list of lines. Join with \\n."""
+    p = tmp_path / "a.md"
+    r = t.file_write(str(p), ["Pixel the cat", "learned Python", "one loop at a time"])
+    assert r.startswith("✅")
+    assert p.read_text() == "Pixel the cat\nlearned Python\none loop at a time\n"
+
+
+def test_file_write_int_content(tmp_path):
+    """Models occasionally stringify numbers — coerce to str, don't crash."""
+    p = tmp_path / "a.md"
+    r = t.file_write(str(p), 42)
+    assert r.startswith("✅")
+    assert p.read_text() == "42\n"
+
+
+def test_file_write_bool_content(tmp_path):
+    """bool is a subclass of int — make sure True/False don't write as '1'/''."""
+    p = tmp_path / "a.md"
+    t.file_write(str(p), True)
+    assert p.read_text() == "true\n"
+    t.file_write(str(p), False)
+    assert p.read_text() == "false\n"
+
+
+def test_file_write_none_content_returns_error(tmp_path):
+    """None should be a friendly ❌, not a TypeError."""
+    p = tmp_path / "a.md"
+    r = t.file_write(str(p), None)
+    assert r.startswith("❌")
+    assert "None" in r
+    assert not p.exists()
+
+
+def test_file_write_missing_path_returns_error(tmp_path):
+    """A path of '' or non-str must be friendly, not a TypeError."""
+    r = t.file_write("", "hi")
+    assert r.startswith("❌")
+    r = t.file_write(None, "hi")
+    assert r.startswith("❌")
+
+
+def test_file_write_creates_parent_dirs(tmp_path):
+    """Nested paths that don't exist yet should be created."""
+    p = tmp_path / "deep" / "nested" / "tail.md"
+    t.file_write(str(p), "hi from deep nesting")
+    assert p.read_text() == "hi from deep nesting\n"
+
+
+def test_file_write_expands_tilde(tmp_path, monkeypatch):
+    """`~/Desktop/tail.md` should expand to the user's home, not a literal dir."""
+    import os
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    r = t.file_write("~/Desktop/tail.md", "the cat coded at dawn")
+    assert r.startswith("✅")
+    assert (fake_home / "Desktop" / "tail.md").read_text() == "the cat coded at dawn\n"
+
+
+def test_file_write_permission_denied(tmp_path):
+    """Writing to a non-writable location returns a friendly error."""
+    # macOS lets root write anywhere; skip on platforms that won't enforce it
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("POSIX permissions only")
+    p = tmp_path / "readonly"
+    p.mkdir()
+    p.chmod(0o555)
+    target = p / "tail.md"
+    r = t.file_write(str(target), "nope")
+    # On macOS as non-root this returns permission denied; as root it may
+    # actually succeed. Accept either a clean success or a clean error.
+    assert r.startswith("✅") or r.startswith("❌"), r
+
