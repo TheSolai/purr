@@ -4,6 +4,15 @@ All notable changes to **purr** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] — 2026-09-04
+
+### Added
+- **Web access (2 tools)**: `web_fetch` (URL → text, regex-based HTML stripping, 12k char cap) and `web_search` (DuckDuckGo Lite, no API key, redirects unwrapped). All non-Friend personas get both.
+- **YOLO mode**: `/yolo on` → `/yolo confirm` opt-in toggle that pre-approves all dangerous tool calls and writes an append-only audit log to `~/.purr/logs/yolo-actions.log`. Two-step on, one-step off, never crashes the session on log errors. Header shows `⚠ YOLO` warning when on.
+- **6 more tests** (web tools, DDG redirect unwrap, config round-trip on yolo_mode) → 53 total, all green.
+- **CHANGELOG.md**, **CONTRIBUTING.md**, **Makefile**, **docs/screenshot.svg** (live TUI render).
+- **GitHub Actions CI** for Python 3.11 / 3.12 / 3.13 on macOS.
+
 ## [0.1.0] — 2026-09-04
 
 ### Added

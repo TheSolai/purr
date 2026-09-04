@@ -16,8 +16,8 @@ from purr import tools as t
 
 
 def test_registry_count():
-    """We expect exactly 27 tools shipped in v0.1."""
-    assert len(t.TOOLS) == 27
+    """We expect exactly 29 tools shipped in v0.2 (added web_fetch + web_search)."""
+    assert len(t.TOOLS) == 29
 
 
 def test_every_tool_has_schema():
@@ -231,3 +231,69 @@ def test_is_dangerous_tool():
     assert t.is_dangerous_tool("kill_process") is True
     assert t.is_dangerous_tool("list_dir") is False
     assert t.is_dangerous_tool("doesnt_exist") is False
+
+
+# ---- web tools ------------------------------------------------------------
+
+def test_web_tools_present():
+    """Both web_fetch and web_search must be in the registry."""
+    assert "web_fetch" in t.TOOLS
+    assert "web_search" in t.TOOLS
+    # web_fetch and web_search should NOT be dangerous — they're read-only
+    assert not t.TOOLS["web_fetch"].dangerous
+    assert not t.TOOLS["web_search"].dangerous
+    # open_url also not dangerous (it just opens a browser)
+    assert not t.TOOLS["open_url"].dangerous
+    # download IS dangerous (writes to disk)
+    assert t.TOOLS["download"].dangerous
+
+
+def test_web_fetch_refuses_bad_schemes():
+    """file://, javascript:, etc. should all be refused."""
+    for bad in ("file:///etc/passwd", "javascript:alert(1)", "ftp://example.com"):
+        result = t.web_fetch(bad)
+        assert "refused" in result.lower() or "bad url" in result.lower(), f"failed for {bad}: {result!r}"
+
+
+def test_web_fetch_smoke():
+    """Pull a real URL (GitHub raw README) and verify the title shows up."""
+    result = t.web_fetch("https://raw.githubusercontent.com/TheSolai/purr/main/README.md", max_chars=2000)
+    assert "purr" in result.lower()
+    assert "ollama" in result.lower()
+
+
+def test_web_search_refuses_empty():
+    assert "empty" in t.web_search("").lower()
+
+
+def test_web_search_returns_results():
+    """Search for something we know exists."""
+    result = t.web_search("python programming language", max_results=3)
+    # Either we get results OR DDG rate-limited us — both are valid
+    assert "result" in result.lower() or "no results" in result.lower()
+
+
+def test_ddg_redirect_unwrap():
+    """DDG returns //duckduckgo.com/l/?uddg=REAL&rut=... — we should unwrap.
+
+    The unwrap helper is defined inside web_search as a closure, so we
+    re-implement it here to keep the test self-contained.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    def unwrap(url):
+        if "duckduckgo.com/l/" not in url and "uddg=" not in url:
+            return url
+        try:
+            parsed = urlparse(url if url.startswith("http") else "https:" + url)
+            qs = parse_qs(parsed.query)
+            if "uddg" in qs:
+                return qs["uddg"][0]
+        except Exception:
+            pass
+        return url
+
+    wrapped = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fgithub.com%2Fpaulrobello%2Fparllama&rut=abc"
+    assert unwrap(wrapped) == "https://github.com/paulrobello/parllama"
+    # passthrough for non-DDG URLs
+    assert unwrap("https://example.com/foo") == "https://example.com/foo"

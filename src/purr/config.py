@@ -18,6 +18,11 @@ class Config:
     default_model: str = "llama3-groq-tool-use:8b"
     theme: str = "catppuccin-mocha"
     confirm_dangerous_tools: bool = True
+    # YOLO mode = pre-approve all dangerous tools. Off by default.
+    # Enable with /yolo in the TUI (requires confirmation), or set in config.toml.
+    # When on, every destructive action runs without prompting AND gets audit-logged
+    # to ~/.purr/logs/yolo-actions.log.
+    yolo_mode: bool = False
     max_history_messages: int = 50
     temperature: float = 0.7
     extra: dict = field(default_factory=dict)
@@ -38,6 +43,7 @@ class Config:
             "default_model",
             "theme",
             "confirm_dangerous_tools",
+            "yolo_mode",
             "max_history_messages",
             "temperature",
         ):
@@ -45,7 +51,8 @@ class Config:
                 setattr(cfg, key, data[key])
         cfg.extra = {k: v for k, v in data.items() if k not in {
             "ollama_host", "default_model", "theme",
-            "confirm_dangerous_tools", "max_history_messages", "temperature",
+            "confirm_dangerous_tools", "yolo_mode",
+            "max_history_messages", "temperature",
         }}
         return cfg
 
@@ -57,6 +64,7 @@ class Config:
             f'default_model = "{self.default_model}"',
             f'theme = "{self.theme}"',
             f"confirm_dangerous_tools = {str(self.confirm_dangerous_tools).lower()}",
+            f"# yolo_mode = {str(self.yolo_mode).lower()}  # ⚠ pre-approves all dangerous tools",
             f"max_history_messages = {self.max_history_messages}",
             f"temperature = {self.temperature}",
         ]

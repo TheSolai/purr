@@ -772,6 +772,162 @@ def reveal_in_finder(path: str) -> str:
         return f"❌ {e}"
 
 
+# ---- web access -----------------------------------------------------------
+
+_USER_AGENT = "purr/0.1 (+ollama local assistant; +https://github.com/TheSolai/purr)"
+
+
+def _strip_html(html: str) -> str:
+    """Cheap HTML-to-text without external deps. Not perfect, but good enough
+    for feeding clean prose to an LLM."""
+    import re
+    html = re.sub(r"<script\b[^>]*>.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r"<style\b[^>]*>.*?</style>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r"<!--.*?-->", " ", html, flags=re.DOTALL)
+    html = re.sub(r"<(br|/p|/li|/tr|/div|h[1-6])[^>]*>", "\n", html, flags=re.IGNORECASE)
+    html = re.sub(r"<[^>]+>", " ", html)
+    html = (
+        html.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+    )
+    lines = []
+    for ln in html.splitlines():
+        ln = " ".join(ln.split())
+        if ln:
+            lines.append(ln)
+    return "\n".join(lines)
+
+
+def web_fetch(url: str, max_chars: int = 12000, timeout: int = 20) -> str:
+    """Fetch a URL and return the page as plain text. No API key, no JS.
+
+    Returns up to `max_chars` characters (default 12k — enough for a full
+    README or news article, will be truncated for very long pages).
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return f"❌ refused: scheme '{parsed.scheme}' is not allowed"
+    if not parsed.netloc:
+        return f"❌ bad URL: no host"
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": _USER_AGENT,
+            "Accept": "text/html, text/plain, text/markdown;q=0.9, */*;q=0.5",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            raw = resp.read()
+            charset = "utf-8"
+            if "charset=" in ctype:
+                try:
+                    charset = ctype.split("charset=", 1)[1].split(";")[0].strip()
+                except Exception:
+                    pass
+            try:
+                text = raw.decode(charset, errors="replace")
+            except LookupError:
+                text = raw.decode("utf-8", errors="replace")
+            final_url = resp.geturl()
+            status = resp.status
+    except Exception as e:
+        return f"❌ fetch failed: {e}"
+    if "html" in ctype.lower() or "<html" in text[:200].lower():
+        body = _strip_html(text)
+    else:
+        body = text
+    body = body.strip()
+    if len(body) > max_chars:
+        body = body[:max_chars] + f"\n\n…(truncated, full length {len(body)} chars)"
+    return (
+        f"📥 {final_url}  (HTTP {status}, {ctype.split(';')[0]})\n\n{body}"
+    )
+
+
+def web_search(query: str, max_results: int = 8, timeout: int = 15) -> str:
+    """Search the web using DuckDuckGo's Lite endpoint. No API key needed.
+
+    Uses `lite.duckduckgo.com` because the main HTML endpoint is heavily
+    JavaScript-rendered and returns 14KB of shell to non-browser UAs.
+    """
+    q = (query or "").strip()
+    if not q:
+        return "❌ empty query"
+    url = "https://lite.duckduckgo.com/lite/?" + urllib.parse.urlencode({"q": q, "kl": "us-en"})
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": _USER_AGENT,
+            "Accept": "text/html",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"❌ search failed: {e}"
+    import re
+    from urllib.parse import parse_qs, urlparse, urlunparse
+
+    def _unwrap_ddg(url: str) -> str:
+        """DDG wraps every result in a redirect like //duckduckgo.com/l/?uddg=REAL&rut=...
+        Extract the real destination."""
+        if "duckduckgo.com/l/" not in url and "uddg=" not in url:
+            return url
+        try:
+            parsed = urlparse(url if url.startswith("http") else "https:" + url)
+            qs = parse_qs(parsed.query)
+            if "uddg" in qs:
+                return qs["uddg"][0]
+        except Exception:
+            pass
+        return url
+
+    rows: list[dict] = []
+    # DDG Lite structure: each result has an <a href="DUCK_REDIRECT" class='result-link'>Title</a>
+    # followed by a sibling <td class='result-snippet'>SNIPPET</td>.
+    # Note: href comes BEFORE class in DDG Lite, and class uses single quotes.
+    for m in re.finditer(
+        r"<a[^>]+href=['\"](?P<url>[^'\"]+)['\"][^>]+class=['\"]result-link['\"][^>]*>(?P<title>.*?)</a>.*?"
+        r"<td[^>]+class=['\"]result-snippet['\"][^>]*>(?P<snippet>.*?)</td>",
+        text, flags=re.DOTALL,
+    ):
+        url = m.group("url")
+        if "duckduckgo-help-pages" in url or "ads-by-microsoft" in url:
+            continue
+        rows.append({
+            "title": _strip_html(m.group("title")).strip(),
+            "url": _unwrap_ddg(url),
+            "snippet": _strip_html(m.group("snippet")).strip()[:300],
+        })
+        if len(rows) >= max_results:
+            break
+    if not rows:
+        for m in re.finditer(
+            r"<a[^>]+href=['\"](?P<url>[^'\"]+)['\"][^>]+class=['\"]result-link['\"][^>]*>(?P<title>.*?)</a>",
+            text, flags=re.DOTALL,
+        ):
+            url = m.group("url")
+            if "duckduckgo-help-pages" in url or "ads-by-microsoft" in url:
+                continue
+            rows.append({
+                "title": _strip_html(m.group("title")).strip(),
+                "url": _unwrap_ddg(url),
+                "snippet": "(no snippet)",
+            })
+            if len(rows) >= max_results:
+                break
+    if not rows:
+        return f"🔎 no results for '{query}' (DuckDuckGo returned no parseable hits)"
+    lines = [f"🔎 {len(rows)} result(s) for '{query}':"]
+    for i, r in enumerate(rows, 1):
+        lines.append(f"\n  {i}. {r['title']}")
+        lines.append(f"     {r['url']}")
+        if r['snippet'] and r['snippet'] != "(no snippet)":
+            lines.append(f"     {r['snippet']}")
+    return "\n".join(lines)
+
+
 # ---- process / activity monitor --------------------------------------------
 
 def _parse_ps_output(out: str) -> list[dict]:
@@ -1390,6 +1546,99 @@ def _register_files_tools() -> None:
 
 
 _register_files_tools()
+
+
+# ---- register the web tools -----------------------------------------------
+
+def _register_web_tools() -> None:
+    TOOLS["open_url"] = ToolSpec(
+        name="open_url",
+        description="Open a URL in the user's default browser. http/https/ftp/file only.",
+        fn=open_url,
+        dangerous=False,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "open_url",
+                "description": "Open a URL in the user's default browser. Use for sites that need JS rendering.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"url": {"type": "string"}},
+                    "required": ["url"],
+                },
+            },
+        },
+    )
+    TOOLS["download"] = ToolSpec(
+        name="download",
+        description="Download a file from a URL to ~/Downloads. Prompts before installing.",
+        fn=download,
+        dangerous=True,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "download",
+                "description": "Download a file via HTTP. Writes to dest_dir (default ~/Downloads).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url":      {"type": "string"},
+                        "dest_dir": {"type": "string", "default": "~/Downloads"},
+                        "filename": {"type": "string"},
+                        "timeout":  {"type": "integer", "default": 120},
+                    },
+                    "required": ["url"],
+                },
+            },
+        },
+    )
+    TOOLS["web_fetch"] = ToolSpec(
+        name="web_fetch",
+        description="Fetch a URL and return the page as plain text. No API key needed.",
+        fn=web_fetch,
+        dangerous=False,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "Fetch a URL and return its content as plain text. Use for reading docs, READMEs, articles, GitHub pages, etc. No JavaScript support — use open_url for JS-heavy sites.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url":        {"type": "string"},
+                        "max_chars":  {"type": "integer", "default": 12000},
+                        "timeout":    {"type": "integer", "default": 20},
+                    },
+                    "required": ["url"],
+                },
+            },
+        },
+    )
+    TOOLS["web_search"] = ToolSpec(
+        name="web_search",
+        description="Search the web via DuckDuckGo. No API key needed. Returns titles, URLs, snippets.",
+        fn=web_search,
+        dangerous=False,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web using DuckDuckGo's HTML endpoint. Returns up to `max_results` results with title, URL, and snippet. No API key required.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query":       {"type": "string"},
+                        "max_results": {"type": "integer", "default": 8},
+                        "timeout":     {"type": "integer", "default": 15},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+    )
+
+
+_register_web_tools()
 
 
 # ---- register the activity-monitor tools -----------------------------------

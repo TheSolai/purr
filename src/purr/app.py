@@ -59,6 +59,7 @@ from purr.config import Config
 from purr.history import ChatHistory
 from purr.ollama_client import ChatMessage, OllamaClient
 from purr import tools as toolmod
+from purr import yolo as yolomod
 
 
 # ---- widget helpers --------------------------------------------------------
@@ -112,7 +113,11 @@ class Header(Static):
         status.append("   ·   model: ", style="dim")
         status.append(app.current_model, style="#94e2d5")
         status.append(f"   ·   tools: {n_tools}", style="dim")
-        if n_tools == 0:
+        if app.config.yolo_mode:
+            status.append("   ·   ", style="dim")
+            status.append("⚠ YOLO ", style="bold #f38ba8 blink")
+            status.append("(pre-approving all dangerous tools · /yolo to disable)", style="bold #f38ba8")
+        elif n_tools == 0:
             status.append("  (chat-only — /agent to switch)", style="dim italic")
         else:
             status.append("   ·   type / for commands, ctrl+c to quit", style="dim")
@@ -331,6 +336,8 @@ class PurrApp(App):
             self._show_role()
         elif cmd == "/status":
             self._show_status()
+        elif cmd == "/yolo":
+            self._cmd_yolo(rest)
         elif cmd == "/new":
             self.action_new_agent()
         else:
@@ -349,6 +356,7 @@ class PurrApp(App):
             "- `/tools` — show tools enabled for the active agent\n"
             "- `/role` — show the active agent's category + permissions\n"
             "- `/status` — show purr + ollama + model state\n"
+            "- `/yolo` — toggle yolo mode (pre-approve all dangerous tools + audit log)\n"
             "- `/clear` — clear chat  (`ctrl+l`)\n"
             "- `/whoami` — show active agent + model\n"
             "- `/quit` — exit purr  (`ctrl+c`)\n\n"
@@ -385,9 +393,78 @@ class PurrApp(App):
             f"- chats dir: `{paths.chats_dir()}`\n"
             f"- agents dir: `{paths.agents_dir()}`\n"
             f"- config: `{paths.config_path()}`\n"
-            f"- confirm dangerous tools: `{self.config.confirm_dangerous_tools}`",
+            f"- confirm dangerous tools: `{self.config.confirm_dangerous_tools}`\n"
+            f"- yolo mode: `{'ON ⚠' if self.config.yolo_mode else 'off'}`",
             "#cdd6f4",
         )
+
+    def _cmd_yolo(self, args: list[str]) -> None:
+        """Toggle yolo mode (pre-approve all dangerous tools)."""
+        sub = (args[0].lower() if args else "").strip()
+        if sub in ("on", "enable", "1", "true"):
+            if self.config.yolo_mode:
+                self._append_bubble("purr", "YOLO is already on.", "#f38ba8")
+                return
+            # enabling requires a second confirm — granting system trust is not casual
+            self._append_bubble(
+                "purr",
+                "⚠️  You're about to enable **YOLO MODE**.\n\n"
+                "Every dangerous tool call (file delete, process kill, app install, "
+                "osascript, calendar/reminders/notes write, brew install, download) "
+                "will run **without prompting** for as long as YOLO is on.\n\n"
+                "All actions are logged to `~/.purr/logs/yolo-actions.log`.\n\n"
+                "To confirm, type `/yolo confirm`.",
+                "#f38ba8",
+            )
+            return
+        if sub == "confirm":
+            self.config.yolo_mode = True
+            self.config.save()
+            self._refresh_chrome()
+            self._append_bubble(
+                "purr",
+                "⚠️ **YOLO MODE ON** — every dangerous tool will execute without prompting. "
+                "Logged to `~/.purr/logs/yolo-actions.log`.\n\nType `/yolo off` to disable.",
+                "#f38ba8",
+            )
+            return
+        if sub in ("off", "disable", "0", "false"):
+            if not self.config.yolo_mode:
+                self._append_bubble("purr", "YOLO is already off.", "#a6e3a1")
+                return
+            self.config.yolo_mode = False
+            self.config.save()
+            self._refresh_chrome()
+            self._append_bubble("purr", "✓ YOLO disabled. Dangerous tools will prompt again.", "#a6e3a1")
+            return
+        if sub in ("log", "audit", "history"):
+            tail = yolomod.tail(30)
+            self._append_bubble("purr", f"**yolo-actions.log (last 30)**\n\n```\n{tail}\n```", "#cdd6f4")
+            return
+        # no subcommand — show status
+        if self.config.yolo_mode:
+            self._append_bubble(
+                "purr",
+                "⚠ **YOLO MODE IS ON**\n\n"
+                "Every dangerous tool runs without prompting. Actions logged to "
+                "`~/.purr/logs/yolo-actions.log`.\n\n"
+                "Commands:\n"
+                "  `/yolo off`  — disable (instant, no confirm)\n"
+                "  `/yolo log`  — show recent actions",
+                "#f38ba8",
+            )
+        else:
+            self._append_bubble(
+                "purr",
+                "**YOLO mode is OFF** (safe default).\n\n"
+                "When ON, all dangerous tools run without prompting. "
+                "Use this only when you trust the active agent's prompt fully.\n\n"
+                "Commands:\n"
+                "  `/yolo on`  → `/yolo confirm`  — enable (two-step)\n"
+                "  `/yolo off`                     — disable (instant)\n"
+                "  `/yolo log`                     — show recent audit log",
+                "#cdd6f4",
+            )
 
     def _cmd_agent(self, args: list[str]) -> None:
         if not args or args[0] in ("list", "ls"):
@@ -583,8 +660,12 @@ class PurrApp(App):
                     else:
                         args = dict(raw_args)
 
-                    # dangerous-tool confirmation
-                    if self.config.confirm_dangerous_tools and toolmod.is_dangerous_tool(tool_name):
+                    # dangerous-tool confirmation — skip if yolo is on
+                    if (
+                        self.config.confirm_dangerous_tools
+                        and not self.config.yolo_mode
+                        and toolmod.is_dangerous_tool(tool_name)
+                    ):
                         ok = await self._confirm(f"agent wants to run dangerous tool `{tool_name}`\n  args: `{json.dumps(args)[:300]}`\n\nallow?")
                         if not ok:
                             result = "⛔ user denied this tool call"
@@ -592,6 +673,8 @@ class PurrApp(App):
                             result = toolmod.call(tool_name, **args)
                     else:
                         result = toolmod.call(tool_name, **args)
+                        if toolmod.is_dangerous_tool(tool_name) and self.config.yolo_mode:
+                            yolomod.record(tool_name, args, result)
 
                     self._append_tool(tool_name, args, result)
                     messages.append({"role": "tool", "name": tool_name, "content": result})
