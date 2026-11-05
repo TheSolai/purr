@@ -52,15 +52,15 @@ First launch:
 
 | Persona | Glyph | Role | Tools |
 |---|---|---|---|
-| **Dross** (default) | `(◉_◉)` | general-purpose Mac assistant, OpenClaw primary | 27 — everything |
-| **Assistant** | `(=^.^=)` | polite general-purpose companion | 27 — everything |
+| **Dross** (default) | `(◉_◉)` | general-purpose Mac assistant, OpenClaw primary | 29 — everything |
+| **Assistant** | `(=^.^=)` | polite general-purpose companion | 29 — everything |
 | **Friend** | `(♥.♥)` | warm chat-only companion | 0 — chat only |
-| **Mac Planner** | `(☼.☼)` | Calendar / Reminders / Notes / apps | 12 — productivity |
-| **Sysadmin** | `(>_>)` | shell, files, processes, system info | 24 — admin |
+| **Mac Planner** | `(☼.☼)` | Calendar / Reminders / Notes / apps | 14 — productivity |
+| **Sysadmin** | `(>_>)` | shell, files, processes, system info | 26 — admin |
 
 Each persona has a distinct voice, glyph, and tool scope. The header shows the role category as a color-coded pill: `[assistant]`, `[friend]`, `[planner]`, `[admin]`, `[general]`.
 
-### 27 tools, three safety tiers
+### 29 tools, three safety tiers
 
 **Read-only (no confirmation):**
 `list_dir`, `desktop_summary`, `app_status`, `processes`, `top_processes`, `process_info`, `find_files`, `disk_usage`, `system_info`, `file_read`, `open_url`, `reveal_in_finder`, `calendar today|list`, `reminders list`, `notes list`
